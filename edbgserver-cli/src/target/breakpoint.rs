@@ -139,7 +139,7 @@ impl HwBreakpoint for EdbgTarget {
 }
 
 pub struct WatchPointMeta {
-    link_id: PerfEventLinkId,
+    link_ids: Vec<PerfEventLinkId>,
     kind: WatchKind,
     len: u64,
 }
@@ -155,10 +155,16 @@ impl HwWatchpoint for EdbgTarget {
             return Ok(false);
         }
         match self.internel_attach_perf_event_watch_point(addr, len, kind) {
-            Ok(link_id) => {
+            Ok(link_ids) => {
                 info!("Attached perf event (watch point) at VMA: {:#x}", addr);
-                self.active_hw_watchpoint
-                    .insert(addr, WatchPointMeta { link_id, kind, len });
+                self.active_hw_watchpoint.insert(
+                    addr,
+                    WatchPointMeta {
+                        link_ids,
+                        kind,
+                        len,
+                    },
+                );
                 Ok(true)
             }
             Err(e) => {
@@ -176,12 +182,28 @@ impl HwWatchpoint for EdbgTarget {
     ) -> TargetResult<bool, Self> {
         if let Some(watch_point_meta) = self.active_hw_watchpoint.remove(&addr) {
             log::info!("Detaching perf event (watch point) at VMA: {:#x}", addr);
-            self.get_perf_event_program()
-                .detach(watch_point_meta.link_id)
-                .map_err(|e| {
-                    error!("aya detach failed: {}", e);
-                    TargetError::NonFatal
-                })?;
+            let prog = self.get_perf_event_program();
+            let all_success = watch_point_meta
+                .link_ids
+                .into_iter()
+                .map(|id| {
+                    prog.detach(id)
+                        .map_err(|e| {
+                            error!("aya detach failed: {}", e);
+                            e
+                        })
+                        .is_ok()
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .all(|ok| ok);
+            if !all_success {
+                error!(
+                    "One or more perf event detachments failed at VMA: {:#x}",
+                    addr
+                );
+                return Err(TargetError::NonFatal);
+            }
             Ok(true)
         } else {
             Ok(false)
@@ -282,7 +304,7 @@ impl EdbgTarget {
         address: u64,
         length: u64,
         kind: WatchKind,
-    ) -> Result<PerfEventLinkId> {
+    ) -> Result<Vec<PerfEventLinkId>> {
         debug!("Attaching perf event (watch point) to {:#x}", address);
         let rw_flags = match kind {
             WatchKind::Write => PerfBreakpointType::Write,
@@ -306,17 +328,39 @@ impl EdbgTarget {
             address,
             length,
         });
-        let scope = PerfEventScope::OneProcess {
-            pid: self.get_pid()?,
-            cpu: None,
-        };
+        let pid = self.get_pid()?;
+        let tasks = procfs::process::Process::new(pid as i32)
+            .map_err(|e| anyhow::anyhow!("Failed to open process {}: {}", pid, e))?
+            .tasks()
+            .map_err(|e| anyhow::anyhow!("Failed to read tasks for pid {}: {}", pid, e))?;
+        let mut links = Vec::new();
+        let prog = self.get_perf_event_program();
         let sample_policy = SamplePolicy::Period(1); // sample every events
-        debug!("attach args: {:?} {:?} {:?}", config, scope, sample_policy);
-        let link_id = self
-            .get_perf_event_program()
-            .attach(config, scope, sample_policy, true)
-            .map_err(|e| anyhow::anyhow!("aya attach failed: {}", e))?;
-        Ok(link_id)
+        for task in tasks {
+            let tid = match task {
+                Ok(t) => t.tid,
+                Err(e) => {
+                    warn!("Skipping unreadable task for pid {}: {}", pid, e);
+                    continue;
+                }
+            };
+            let scope = PerfEventScope::OneProcess {
+                pid: tid as u32,
+                cpu: None,
+            };
+            let link_id = prog
+                .attach(config, scope, sample_policy, true)
+                .map_err(|e| {
+                    error!(
+                        "aya perf event attach (watch point) failed. addr: {:#x}, tid: {}. error: {}",
+                        address, tid, e
+                    );
+                    anyhow::anyhow!("aya perf event attach (watch point) failed for tid {}: {}", tid, e)
+                })?;
+            debug!("Attached watch point to thread TID: {}", tid);
+            links.push(link_id);
+        }
+        Ok(links)
     }
 
     pub fn attach_init_probe(
