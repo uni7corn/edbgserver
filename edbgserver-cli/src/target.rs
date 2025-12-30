@@ -49,7 +49,7 @@ pub struct EdbgTarget {
     pub notifier: AsyncFd<OwnedFd>,
     thread_filter: Array<MapData, ThreadFilter>,
     active_sw_breakpoints: HashMap<u64, UProbeLinkId>,
-    active_hw_breakpoints: HashMap<u64, PerfEventLinkId>,
+    active_hw_breakpoints: HashMap<u64, Vec<PerfEventLinkId>>,
     active_hw_watchpoint: HashMap<u64, breakpoint::WatchPointMeta>,
     temp_step_breakpoints: Option<(u64, UProbeLinkId)>,
     init_probe_link_id: Option<UProbeLinkId>,

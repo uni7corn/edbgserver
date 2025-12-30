@@ -108,12 +108,29 @@ impl HwBreakpoint for EdbgTarget {
         addr: <Self::Arch as gdbstub::arch::Arch>::Usize,
         _kind: <Self::Arch as gdbstub::arch::Arch>::BreakpointKind,
     ) -> TargetResult<bool, Self> {
-        if let Some(link_id) = self.active_hw_breakpoints.remove(&addr) {
-            log::info!("Detaching perf event at VMA: {:#x}", addr);
-            self.get_perf_event_program().detach(link_id).map_err(|e| {
-                error!("aya detach failed: {}", e);
-                TargetError::NonFatal
-            })?;
+        if let Some(link_ids) = self.active_hw_breakpoints.remove(&addr) {
+            log::info!("Detaching perf events at VMA: {:#x}", addr);
+            let prog = self.get_perf_event_program();
+            let all_success = link_ids
+                .into_iter()
+                .map(|id| {
+                    prog.detach(id)
+                        .map_err(|e| {
+                            error!("aya detach failed: {}", e);
+                            e
+                        })
+                        .is_ok()
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .all(|ok| ok);
+            if !all_success {
+                error!(
+                    "One or more perf event detachments failed at VMA: {:#x}",
+                    addr
+                );
+                return Err(TargetError::NonFatal);
+            }
             Ok(true)
         } else {
             Ok(false)
@@ -220,29 +237,46 @@ impl EdbgTarget {
         Ok(link_id)
     }
 
-    pub fn internel_attach_perf_event_break_point(&mut self, addr: u64) -> Result<PerfEventLinkId> {
-        debug!("Attaching perf event to {}", addr);
+    pub fn internel_attach_perf_event_break_point(
+        &mut self,
+        addr: u64,
+    ) -> Result<Vec<PerfEventLinkId>> {
+        let pid = self.get_pid()?;
+        debug!("Attaching perf event to {:#x} for process {}", addr, pid);
         let config = PerfEventConfig::Breakpoint(BreakpointConfig::Instruction { address: addr });
-        let scope = PerfEventScope::OneProcess {
-            pid: self.get_pid()?,
-            cpu: None,
-        };
-        let sample_policy = SamplePolicy::Period(1); // sample every events
-        let link_id = self
-            .get_perf_event_program()
-            .attach(config, scope, sample_policy, true)
-            .map_err(|e| {
-                error!(
-                    "aya perf event attach failed. addr: {:#x}, pid: {}. error: {}",
-                    addr,
-                    self.get_pid().unwrap_or(0),
-                    e
-                );
-                anyhow::anyhow!("aya perf event attach failed: {}", e)
-            })?;
-        Ok(link_id)
+        let sample_policy = SamplePolicy::Period(1);
+        let tasks = procfs::process::Process::new(pid as i32)
+            .map_err(|e| anyhow::anyhow!("Failed to open process {}: {}", pid, e))?
+            .tasks()
+            .map_err(|e| anyhow::anyhow!("Failed to read tasks for pid {}: {}", pid, e))?;
+        let mut links = Vec::new();
+        let prog = self.get_perf_event_program();
+        for task in tasks {
+            let tid = match task {
+                Ok(t) => t.tid,
+                Err(e) => {
+                    warn!("Skipping unreadable task for pid {}: {}", pid, e);
+                    continue;
+                }
+            };
+            let scope = PerfEventScope::OneProcess {
+                pid: tid as u32,
+                cpu: None,
+            };
+            let link_id = prog
+                .attach(config, scope, sample_policy, true)
+                .map_err(|e| {
+                    error!(
+                        "aya perf event attach failed. addr: {:#x}, tid: {}. error: {}",
+                        addr, tid, e
+                    );
+                    anyhow::anyhow!("aya perf event attach failed for tid {}: {}", tid, e)
+                })?;
+            debug!("Attached perf event to thread TID: {}", tid);
+            links.push(link_id);
+        }
+        Ok(links)
     }
-
     pub fn internel_attach_perf_event_watch_point(
         &mut self,
         address: u64,
