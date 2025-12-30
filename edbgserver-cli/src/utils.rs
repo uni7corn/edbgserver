@@ -66,6 +66,16 @@ pub fn send_sigcont_to_thread(pid: u32, tid: u32) {
     }
 }
 
+/// Sends a signal to a specific thread.
+///
+/// Implementation Note: In a child namespace, the global TID received from eBPF
+/// cannot be resolved to a local TID. This makes `tgkill` or thread-specific
+/// signaling likely to fail (ESRCH).
+///
+/// Fallback Mechanism:
+/// If sending a signal to the specific TID fails, we fall back to signaling
+/// the entire process. While less granular, it ensures the signal reaches
+/// the target in environments where TID mapping is unavailable.
 pub fn send_sig_to_thread(pid: u32, tid: u32, sig: &Signal) {
     debug!("Sending signal {:?} to pid {} tid {}", sig, pid, tid);
     if let Some(libc_sig) = gdb_sig_to_libc(sig) {

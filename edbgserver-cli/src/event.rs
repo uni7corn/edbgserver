@@ -45,6 +45,21 @@ impl BlockingEventLoop for EdbgEventLoop {
                         };
                         let mut pending_events = Vec::new();
                         debug!("bound tid: {:?}, bound pid: {:?}", target.bound_tid, target.bound_pid);
+                        // HACK: Handling PID/TID mismatch in Linux Namespaces (e.g., WSL, Docker).
+                        //
+                        // The PID/TID captured by eBPF are global IDs from the root namespace. However,
+                        // when edbgserver runs inside a child namespace, these IDs are invalid for
+                        // local operations. Since escaping the namespace to find the PID mapping is
+                        // difficult, we use a heuristic approach:
+                        //
+                        // 1. PID Overriding: We assume the event belongs to our target process and
+                        //    manually overwrite the event's PID with our locally known `bound_pid`.
+                        // 2. TID Limitation: We cannot reliably map the global TID back to the local
+                        //    namespace. Therefore, we prefer using PID-based operations (like memory
+                        //    reading) whenever possible.
+                        //
+                        // Note: This creates a strict one-way flow. Local IDs can be sent to eBPF,
+                        // but IDs received from eBPF must be treated as unreliable in this namespace.
                         while let Some(item) = target.ring_buf.next() {
                             let ptr = item.as_ptr() as *const DataT;
                             let data = unsafe { std::ptr::read_unaligned(ptr) };
@@ -56,7 +71,7 @@ impl BlockingEventLoop for EdbgEventLoop {
                             {
                                 continue;
                             }
-                            // dont check the pid
+                            // don't check the pid
                             pending_events.push(DataT{pid: target.bound_pid.unwrap(), ..data});
                         }
                         guard.clear_ready();
