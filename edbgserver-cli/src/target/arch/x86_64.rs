@@ -5,9 +5,32 @@ use capstone::{
     prelude::*,
 };
 use edbgserver_common::DataT;
+use gdbstub_arch::x86::reg::X86_64CoreRegs;
 use log::{debug, error, info, trace, warn};
 
 use crate::target::EdbgTarget;
+
+pub fn fill_regs(regs: &mut X86_64CoreRegs, ctx: &DataT) {
+    regs.regs[0] = ctx.rax;
+    regs.regs[1] = ctx.rbx;
+    regs.regs[2] = ctx.rcx;
+    regs.regs[3] = ctx.rdx;
+    regs.regs[4] = ctx.rsi;
+    regs.regs[5] = ctx.rdi;
+    regs.regs[6] = ctx.rbp;
+    regs.regs[7] = ctx.rsp;
+    regs.regs[8] = ctx.r8;
+    regs.regs[9] = ctx.r9;
+    regs.regs[10] = ctx.r10;
+    regs.regs[11] = ctx.r11;
+    regs.regs[12] = ctx.r12;
+    regs.regs[13] = ctx.r13;
+    regs.regs[14] = ctx.r14;
+    regs.regs[15] = ctx.r15;
+
+    regs.rip = ctx.rip;
+    regs.eflags = ctx.eflags as u32;
+}
 
 impl EdbgTarget {
     pub fn single_step_thread(&mut self, curr_pc: u64) -> Result<()> {

@@ -8,6 +8,92 @@ use log::{debug, error, info};
 
 use crate::target::EdbgTarget;
 
+pub struct LinuxAArch64Core {}
+
+impl gdbstub::arch::Arch for LinuxAArch64Core {
+    type Usize = u64;
+    type Registers = AArch64MinimalRegs;
+    type RegId = gdbstub_arch::aarch64::reg::id::AArch64RegId;
+    type BreakpointKind = usize;
+
+    fn target_description_xml() -> Option<&'static str> {
+        static DESCRIPTION_XML: &str = concat!(
+            r#"<target version="1.0">"#,
+            "<architecture>aarch64</architecture>",
+            "<osabi>GNU/Linux</osabi>",
+            include_str!("aarch64_core.xml"),
+            "</target>",
+        );
+
+        Some(DESCRIPTION_XML)
+    }
+}
+
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct AArch64MinimalRegs {
+    pub x: [u64; 31],
+    pub sp: u64,
+    pub pc: u64,
+    pub cpsr: u32,
+}
+
+impl gdbstub::arch::Registers for AArch64MinimalRegs {
+    type ProgramCounter = u64;
+
+    fn pc(&self) -> Self::ProgramCounter {
+        self.pc
+    }
+
+    fn gdb_serialize(&self, mut write_byte: impl FnMut(Option<u8>)) {
+        macro_rules! write_bytes {
+            ($var: expr) => {
+                for b in $var.to_le_bytes() {
+                    write_byte(Some(b))
+                }
+            };
+        }
+        for reg in self.x.iter() {
+            write_bytes!(reg);
+        }
+        write_bytes!(self.sp);
+        write_bytes!(self.pc);
+        write_bytes!(self.cpsr);
+    }
+
+    fn gdb_deserialize(&mut self, bytes: &[u8]) -> Result<(), ()> {
+        const CPSR_OFF: usize = core::mem::size_of::<u64>() * 33;
+        const END: usize = CPSR_OFF + core::mem::size_of::<u32>() * 2;
+
+        if bytes.len() < END {
+            return Err(());
+        }
+
+        let mut regs = bytes[0..CPSR_OFF]
+            .chunks_exact(core::mem::size_of::<u64>())
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()));
+
+        for reg in self.x.iter_mut() {
+            *reg = regs.next().ok_or(())?
+        }
+        self.sp = regs.next().ok_or(())?;
+        self.pc = regs.next().ok_or(())?;
+
+        let mut regs = bytes[CPSR_OFF..]
+            .chunks_exact(core::mem::size_of::<u32>())
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()));
+
+        self.cpsr = regs.next().ok_or(())?;
+        Ok(())
+    }
+}
+
+pub fn fill_regs(regs: &mut AArch64MinimalRegs, ctx: &DataT) {
+    regs.x = ctx.regs;
+    regs.pc = ctx.pc;
+    regs.sp = ctx.sp;
+    regs.cpsr = ctx.pstate as u32;
+}
+
 impl EdbgTarget {
     pub fn single_step_thread(&mut self, curr_pc: u64) -> Result<()> {
         let next_pc = self
