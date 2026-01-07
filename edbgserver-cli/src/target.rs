@@ -59,6 +59,8 @@ pub struct EdbgTarget {
     next_host_io_fd: u32,
     pub is_multi_thread: bool,
     need_filter_maps: bool,
+    r_debug_addr: Option<u64>,
+    cached_libraries_xml: String,
 }
 
 pub const HOST_IO_FD_START: u32 = 100;
@@ -113,6 +115,8 @@ impl EdbgTarget {
             next_host_io_fd: HOST_IO_FD_START,
             is_multi_thread,
             need_filter_maps,
+            r_debug_addr: None,
+            cached_libraries_xml: String::new(),
         }
     }
 

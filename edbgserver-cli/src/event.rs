@@ -88,7 +88,7 @@ impl BlockingEventLoop for EdbgEventLoop {
                             info!("Event! PID: {}, TID: {}, PC: {:#x}", data.pid, data.tid, data.pc());
                             target.context = Some(*data);
                             let stop_reason = target.determine_stop_reason(data.tid, data.pc(), data.fault_addr);
-                            target.handle_trap();
+                            target.handle_trap().map_err(WaitForStopReasonError::Target)?;
                             return Ok(Event::TargetStopped(stop_reason));
                         } else {
                             log::warn!("Received events but all were kernel-space traps. Ignoring.");

@@ -191,24 +191,11 @@ impl EdbgTarget {
         .map(|entry| entry.d_val)
         .ok_or_else(|| anyhow!("DT_DEBUG entry not found in _DYNAMIC section"))
     }
-}
 
-impl LibrariesSvr4 for EdbgTarget {
-    fn get_libraries_svr4(
-        &self,
-        offset: u64,
-        length: usize,
-        buf: &mut [u8],
-    ) -> TargetResult<usize, Self> {
-        debug!(
-            "get_libraries_svr4 called with offset={} length={}",
-            offset, length
-        );
-
+    fn generate_xml_from_memory(&self, r_debug_addr: u64) -> Result<String> {
+        debug!("generate_xml_from_memory called");
         let lib_elems = self
-            .find_r_debug_addr()
-            .inspect_err(|e| error!("Failed to find r_debug address: {}", e))
-            .and_then(|addr| self.read_struct::<RDebug>(addr))
+            .read_struct::<RDebug>(r_debug_addr)
             .inspect_err(|e| error!("Failed to read r_debug struct: {}", e))
             .map(|r_debug| {
                 let mut next_link_map = r_debug.r_map;
@@ -261,12 +248,41 @@ impl LibrariesSvr4 for EdbgTarget {
             .append(build::from_iter(lib_elems.into_iter()));
 
         let mut xml = String::new();
-        if let Err(e) = tagu::render(root, &mut xml) {
-            error!("Failed to render XML: {}", e);
-            return Ok(0);
-        }
+        tagu::render(root, &mut xml)?;
+        Ok(xml)
+    }
 
-        let xml_bytes = xml.as_bytes();
+    pub fn update_libraries_cache(&mut self) -> Result<()> {
+        if self.r_debug_addr.is_none() {
+            debug!("r_debug_addr is None, parsing ELF to find it...");
+            let addr = self.find_r_debug_addr()?;
+            self.r_debug_addr = Some(addr);
+        }
+        let r_debug_addr = self.r_debug_addr.unwrap();
+        let xml_content = self.generate_xml_from_memory(r_debug_addr)?;
+        if self.cached_libraries_xml != xml_content {
+            debug!(
+                "Libraries list changed, updating cache. Len: {}",
+                xml_content.len()
+            );
+            self.cached_libraries_xml = xml_content;
+        }
+        Ok(())
+    }
+}
+
+impl LibrariesSvr4 for EdbgTarget {
+    fn get_libraries_svr4(
+        &self,
+        offset: u64,
+        length: usize,
+        buf: &mut [u8],
+    ) -> TargetResult<usize, Self> {
+        debug!(
+            "get_libraries_svr4 called with offset={} length={}",
+            offset, length
+        );
+        let xml_bytes = self.cached_libraries_xml.as_bytes();
         let offset = offset as usize;
         let total_len = xml_bytes.len();
         if offset >= total_len {

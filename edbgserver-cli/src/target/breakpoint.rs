@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use aya::programs::{
     perf_event::{
         BreakpointConfig, PerfBreakpointLength, PerfBreakpointType, PerfEventConfig,
@@ -299,6 +299,7 @@ impl EdbgTarget {
         }
         Ok(links)
     }
+
     pub fn internel_attach_perf_event_watch_point(
         &mut self,
         address: u64,
@@ -438,6 +439,10 @@ impl EdbgTarget {
             use process_memory::TryIntoProcessHandle;
             self.process_memory_handle = (target_pid as i32).try_into_process_handle().ok();
 
+            if let Err(e) = self.update_libraries_cache() {
+                error!("Failed to update libraries cache in init trap: {}", e);
+            }
+
             if !self.is_multi_thread {
                 self.thread_filter
                     .set(0, ThreadFilter::Some(target_tid), 0)
@@ -517,33 +522,33 @@ impl EdbgTarget {
         }
     }
 
-    pub fn handle_trap(&mut self) {
-        if let Some(context) = &self.context {
-            debug!(
-                "Handling trap for TID: {}, PC: {:#x}",
-                context.tid,
-                context.pc()
-            );
-            if let Some((addr, link_id)) = self.temp_step_breakpoints.take() {
-                if addr == context.pc() {
-                    debug!(
-                        "Temp breakpoint hit at {:#x} for TID: {}. Detaching UProbe.",
-                        addr, context.tid
-                    );
-                    if let Err(e) = self.get_probe_program().detach(link_id) {
-                        error!("Failed to detach UProbe at {:#x}: {}", addr, e);
-                    }
-                } else {
-                    debug!(
-                        "Trap at {:#x} does not match temp breakpoint at {:#x}. Cleaning up temp BP anyway.",
-                        context.pc(),
-                        addr
-                    );
-                    let _ = self.get_probe_program().detach(link_id);
+    pub fn handle_trap(&mut self) -> Result<()> {
+        let Some(context) = &self.context else {
+            bail!("No context available to handle trap.");
+        };
+        debug!(
+            "Handling trap for TID: {}, PC: {:#x}",
+            context.tid,
+            context.pc()
+        );
+        if let Some((addr, link_id)) = self.temp_step_breakpoints.take() {
+            if addr == context.pc() {
+                debug!(
+                    "Temp breakpoint hit at {:#x} for TID: {}. Detaching UProbe.",
+                    addr, context.tid
+                );
+                if let Err(e) = self.get_probe_program().detach(link_id) {
+                    error!("Failed to detach UProbe at {:#x}: {}", addr, e);
                 }
+            } else {
+                debug!(
+                    "Trap at {:#x} does not match temp breakpoint at {:#x}. Cleaning up temp BP anyway.",
+                    context.pc(),
+                    addr
+                );
+                let _ = self.get_probe_program().detach(link_id);
             }
-        } else {
-            error!("No context available to handle trap.");
         }
+        self.update_libraries_cache()
     }
 }
