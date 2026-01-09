@@ -154,6 +154,22 @@ impl HwWatchpoint for EdbgTarget {
         if self.active_hw_watchpoint.contains_key(&addr) {
             return Ok(false);
         }
+        // x86 debug registers cannot trigger on read-only watchpoints, so the
+        // kernel rejects `HW_BREAKPOINT_R` outright, see
+        // https://github.com/torvalds/linux/blob/v6.12/arch/x86/kernel/hw_breakpoint.c#L345-L377.
+        // so convert read to read/write here
+        #[cfg(target_arch = "x86_64")]
+        let kind = match kind {
+            WatchKind::Read => {
+                warn!(
+                    "x86 architecture does not support read-only watchpoints. Converting to read/write watchpoint at {:#x}",
+                    addr
+                );
+                WatchKind::ReadWrite
+            }
+            other => other,
+        };
+
         match self.internel_attach_perf_event_watch_point(addr, len, kind) {
             Ok(link_ids) => {
                 info!("Attached perf event (watch point) at VMA: {:#x}", addr);
