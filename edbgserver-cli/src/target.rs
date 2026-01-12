@@ -262,18 +262,33 @@ impl MultiThreadBase for EdbgTarget {
         data: &[u8],
         _tid: gdbstub::common::Tid,
     ) -> TargetResult<(), Self> {
-        use process_memory::PutAddress;
-        match self
-            .process_memory_handle
-            .ok_or_else(|| {
-                error!("process handle not init! ");
-                TargetError::NonFatal
-            })?
-            .put_address(start_addr as usize, data)
-        {
+        let pid = self.get_pid().map_err(|e| {
+            error!("Failed to get pid for writing memory: {}", e);
+            TargetError::NonFatal
+        })?;
+        let path = format!("/proc/{}/mem", pid);
+        use std::{
+            fs::OpenOptions,
+            io::{Seek, SeekFrom, Write},
+        };
+        let mut file = match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("Failed to open {}: {:?}", path, e);
+                return Err(TargetError::Io(e));
+            }
+        };
+        if let Err(e) = file.seek(SeekFrom::Start(start_addr)) {
+            warn!("Failed to seek to {:#x}: {:?}", start_addr, e);
+            return Err(TargetError::Io(e));
+        }
+        match file.write_all(data) {
             Ok(_) => Ok(()),
             Err(e) => {
-                warn!("Failed to write memory at {:#x}: {:?}", start_addr, e);
+                warn!(
+                    "Failed to write memory at {:#x} via /proc/mem: {:?}",
+                    start_addr, e
+                );
                 Err(TargetError::Io(e))
             }
         }
