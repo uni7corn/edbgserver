@@ -57,16 +57,17 @@ impl SwBreakpoint for EdbgTarget {
         if self.active_breakpoints.contains_key(&addr) {
             return Ok(false);
         }
-        self.internel_attach_uprobe(addr)
-            .map_err(|e| {
-                error!("Failed to attach UProbe at VMA {:#x}: {}", addr, e);
-                TargetError::NonFatal
-            })
-            .map(|link_id| {
+        match self.internel_attach_uprobe(addr) {
+            Ok(link_id) => {
                 info!("Attached UProbe at VMA: {:#x}", addr);
                 self.active_breakpoints.insert(addr, link_id);
-                true
-            })
+                Ok(true)
+            }
+            Err(e) => {
+                error!("Failed to add SW breakpoint at {:#x}: {:#}", addr, e);
+                Ok(false)
+            }
+        }
     }
 
     fn remove_sw_breakpoint(
@@ -76,10 +77,10 @@ impl SwBreakpoint for EdbgTarget {
     ) -> TargetResult<bool, Self> {
         if let Some(link_id) = self.active_breakpoints.remove(&addr) {
             log::info!("Detaching UProbe at VMA: {:#x}", addr);
-            self.detach_breakpoint_handle(link_id).map_err(|e| {
-                error!("aya detach failed: {}", e);
-                TargetError::NonFatal
-            })?;
+            if let Err(e) = self.detach_breakpoint_handle(link_id) {
+                error!("Failed to detach SW breakpoint at {:#x}: {:#}", addr, e);
+                return Ok(false);
+            }
             Ok(true)
         } else {
             Ok(false)
@@ -185,70 +186,65 @@ impl HwWatchpoint for EdbgTarget {
         _len: <Self::Arch as gdbstub::arch::Arch>::Usize,
         _kind: gdbstub::target::ext::breakpoints::WatchKind,
     ) -> TargetResult<bool, Self> {
-        if let Some(watch_point_meta) = self.active_watchpoint.remove(&addr) {
-            log::info!("Detaching perf event (watch point) at VMA: {:#x}", addr);
-            let prog = self.get_perf_event_program();
-            let all_success = watch_point_meta
-                .link_ids
-                .into_iter()
-                .map(|id| {
-                    prog.detach(id)
-                        .map_err(|e| {
-                            error!("aya detach failed: {}", e);
-                            e
-                        })
-                        .is_ok()
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .all(|ok| ok);
-            if !all_success {
-                error!(
-                    "One or more perf event detachments failed at VMA: {:#x}",
-                    addr
-                );
-                return Err(TargetError::NonFatal);
-            }
-            Ok(true)
-        } else {
-            Ok(false)
+        let Some(watch_point_meta) = self.active_watchpoint.remove(&addr) else {
+            return Ok(false);
+        };
+        log::info!("Detaching perf event (watch point) at VMA: {:#x}", addr);
+        let prog = self.get_perf_event_program();
+        let all_success = watch_point_meta
+            .link_ids
+            .into_iter()
+            .map(|id| {
+                prog.detach(id)
+                    .map_err(|e| {
+                        error!("aya detach failed: {}", e);
+                        e
+                    })
+                    .is_ok()
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .all(|ok| ok);
+        if !all_success {
+            error!(
+                "One or more perf event detachments failed at VMA: {:#x}",
+                addr
+            );
+            return Ok(false);
         }
+        Ok(true)
     }
 }
 
 impl EdbgTarget {
-    fn resolve_vma_to_probe_location(&self, vma: u64) -> TargetResult<(u64, PathBuf), Self> {
-        let pid = self.get_pid().map_err(|_| TargetError::NonFatal)?;
+    fn resolve_vma_to_probe_location(&self, vma: u64) -> Result<(u64, PathBuf)> {
+        let pid = self.get_pid()?;
         let process =
             procfs::process::Process::new(pid as i32).expect("Failed to open process info");
         let maps = process.maps().expect("Failed to read process maps");
 
         for map in maps {
-            if vma <= map.address.0 || vma > map.address.1 {
+            if vma < map.address.0 || vma >= map.address.1 {
                 continue;
             }
             if let MMapPath::Path(path) = map.pathname {
                 let file_offset = vma - map.address.0 + map.offset;
                 return Ok((file_offset, path));
             } else {
-                error!(
-                    "Cannot attach uprobe to anonymous memory at {:#x} (path name: {:?})",
-                    vma, map.pathname
+                bail!(
+                    "Cannot attach uprobe to anonymous/special memory at {:#x} (name: {:?})",
+                    vma,
+                    map.pathname
                 );
-                return Err(TargetError::NonFatal);
             }
         }
-        error!("Failed to find mapping for VMA {:#x}", vma);
-        Err(TargetError::NonFatal)
+        bail!("Failed to find mapping for VMA {:#x}", vma);
     }
 
     pub fn internel_attach_uprobe(&mut self, addr: u64) -> Result<BreakpointHandle> {
-        let (location, target) = self.resolve_vma_to_probe_location(addr).map_err(|_| {
-            anyhow::anyhow!(
-                "Failed to resolve VMA to probe location for addr {:#x}",
-                addr
-            )
-        })?;
+        let (location, target) = self
+            .resolve_vma_to_probe_location(addr)
+            .context(format!("Failed to resolve VMA {:#x}", addr))?;
         let target_pid = self.get_pid()?;
         debug!(
             "Attaching Temp/Internal UProbe to {:?} at offset {:#x} (VMA: {:#x})",
@@ -401,7 +397,7 @@ impl EdbgTarget {
         target_pid: Option<u32>,
     ) -> Result<()> {
         info!(
-            "Attaching Initial UProbe at {}:{}",
+            "Attaching Initial UProbe at {}:{:#x}",
             binary_target.canonicalize()?.as_os_str().display(),
             break_point
         );

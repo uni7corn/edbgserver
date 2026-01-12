@@ -1,10 +1,12 @@
 use std::{
-    fs::File,
+    fs::{self, File},
+    io,
     path::{Path, PathBuf},
     process::Command,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use goblin::elf::Elf;
 use log::{debug, info};
 use zip::ZipArchive;
 
@@ -15,28 +17,60 @@ pub fn resolve_target(
     package: Option<&str>,
     break_point: u64,
 ) -> Result<(PathBuf, u64)> {
-    let Some(pkg_name) = package else {
-        return Ok((PathBuf::from(target), break_point));
+    let library_path = if let Some(pkg_name) = package {
+        let apk_path = find_apk_path_for_package(pkg_name)
+            .context(format!("Could not find APK for package: {}", pkg_name))?;
+
+        info!("Found APK for package {}: {:?}", pkg_name, apk_path);
+
+        if let Some(extracted_path) = try_find_extracted_library(&apk_path, target) {
+            info!("Found extracted library on disk: {:?}", extracted_path);
+            extracted_path
+        } else {
+            let out_path = extract_so_from_apk(&apk_path, target)
+                .context("Failed to extract native library from APK")?;
+            info!("Extracted {} to {:?}", target, out_path);
+            out_path
+        }
+    } else {
+        PathBuf::from(target)
     };
 
-    let apk_path = find_apk_path_for_package(pkg_name)
-        .context(format!("Could not find APK for package: {}", pkg_name))?;
+    let file_offset = translate_vaddr_to_offset(&library_path, break_point)
+        .context("Failed to resolve virtual address to file offset")?;
 
-    info!("Found APK for package {}: {:?}", pkg_name, apk_path);
+    info!(
+        "Resolved breakpoint: 0x{:x} (Virtual) -> 0x{:x} (Offset)",
+        break_point, file_offset
+    );
 
-    if let Some(extracted_path) = try_find_extracted_library(&apk_path, target) {
-        info!("Found extracted library on disk: {:?}", extracted_path);
-        return Ok((extracted_path, break_point));
+    Ok((library_path, file_offset))
+}
+
+fn translate_vaddr_to_offset(path: &Path, vaddr: u64) -> Result<u64> {
+    let buffer = fs::read(path).context("Failed to read ELF file for parsing")?;
+
+    let elf = Elf::parse(&buffer).context("Failed to parse ELF headers")?;
+
+    for ph in elf.program_headers {
+        if ph.p_type == goblin::elf::program_header::PT_LOAD {
+            // [p_vaddr, p_vaddr + p_memsz)
+            if vaddr >= ph.p_vaddr && vaddr < (ph.p_vaddr + ph.p_memsz) {
+                // File Offset = Target VAddr - Segment VAddr + Segment File Offset
+                let offset = vaddr - ph.p_vaddr + ph.p_offset;
+                debug!(
+                    "Found address 0x{:x} in segment [VAddr: 0x{:x}, Offset: 0x{:x}]. Calculated offset: 0x{:x}",
+                    vaddr, ph.p_vaddr, ph.p_offset, offset
+                );
+                return Ok(offset);
+            }
+        }
     }
 
-    // TODO: up to now, it seems uporbe can't attach to .so inside apk directly, maybe in the future i will
-    // find out how uprobe work with mmap and fix it...
-    let base_offset = find_so_offset_in_apk(&apk_path, target)
-        .context("Failed to find uncompressed native library in APK")?;
-
-    info!("Found {} inside APK at offset {:#x}", target, base_offset);
-
-    Ok((apk_path, base_offset + break_point))
+    bail!(
+        "Address 0x{:x} is not within any LOAD segment of the ELF file. Please ensure you are using a Virtual Address (from readelf/nm).",
+        vaddr
+    );
 }
 
 fn try_find_extracted_library(apk_path: &Path, so_name: &str) -> Option<PathBuf> {
@@ -61,15 +95,43 @@ fn find_apk_path_for_package(package: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(path_str))
 }
 
-fn find_so_offset_in_apk(apk_path: &Path, so_name: &str) -> Result<u64> {
+fn extract_so_from_apk(apk_path: &Path, so_name: &str) -> Result<PathBuf> {
     let file = File::open(apk_path).context("Open APK failed")?;
     let mut archive = ZipArchive::new(file).context("Parse ZIP failed")?;
-    let target_path = format!("lib/arm64-v8a/{}", so_name);
-    let file = archive
-        .by_name(&target_path)
-        .context(format!("'{}' not found in APK", target_path))?;
-    if file.compression() != zip::CompressionMethod::Stored {
-        bail!("Library is compressed! offset is invalid for mmap.");
-    }
-    Ok(file.data_start())
+    let target_in_zip = format!("lib/arm64-v8a/{}", so_name);
+    let out_path = apk_path
+        .parent()
+        .ok_or_else(|| anyhow!("Invalid APK path"))?
+        .join("lib")
+        .join("arm64")
+        .join(so_name);
+
+    let mut zip_file = archive
+        .by_name(&target_in_zip)
+        .context(format!("'{}' not found in APK", target_in_zip))?;
+
+    let mut out_file =
+        File::create(&out_path).context(format!("Failed to create output file: {:?}", out_path))?;
+
+    io::copy(&mut zip_file, &mut out_file).context("Failed to decompress file")?;
+
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(&out_path)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&out_path, perms)?;
+
+    Ok(out_path)
 }
+
+// fn find_so_offset_in_apk(apk_path: &Path, so_name: &str) -> Result<u64> {
+//     let file = File::open(apk_path).context("Open APK failed")?;
+//     let mut archive = ZipArchive::new(file).context("Parse ZIP failed")?;
+//     let target_path = format!("lib/arm64-v8a/{}", so_name);
+//     let file = archive
+//         .by_name(&target_path)
+//         .context(format!("'{}' not found in APK", target_path))?;
+//     if file.compression() != zip::CompressionMethod::Stored {
+//         bail!("Library is compressed! offset is invalid for mmap.");
+//     }
+//     Ok(file.data_start())
+// }
