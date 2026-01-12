@@ -14,9 +14,9 @@ Special thanks to [ShinoLeah](https://github.com/ShinoLeah) for the project [eDB
 - **Hardware Breakpoints:** Utilize ARM64 hardware registers for debugging.
 - **Memory I/O:** Reading from and writing to process memory.
 
-### Current Limitations (eBPF Constraints)
+### Current Limitations
 
-Due to current eBPF subsystem limitations, the following behaviors are not yet supported:
+The following behaviors are not yet supported:
 
 - **Register Modification:** Modifying CPU register values is currently not possible.
 - **Cross-Thread Register Access:** Reading registers from threads other than the one currently triggered (potential for future resolution).
@@ -24,6 +24,9 @@ Due to current eBPF subsystem limitations, the following behaviors are not yet s
 ## Usage
 
 ```sh
+./edbgserver -p io.cyril.supervipplayer -t libsupervipplayer.so -b 0x1848
+
+pwndbg
 pwndbg> target remote :3333
 pwndbg> breakrva 0x18A8 libsupervipplayer.so
 ```
@@ -38,6 +41,7 @@ adb pull /system/bin system/bin
 adb pull /apex apex
 
 pwndbg> set sysroot android_sysroot/
+pwndbg> set breakpoint auto-hw on
 ```
 
 ## Prerequisites
