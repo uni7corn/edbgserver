@@ -593,6 +593,7 @@ impl EdbgTarget {
             context.tid,
             context.pc()
         );
+        self.bound_tid = Some(context.tid);
         if let Some((addr, link_id)) = self.temp_step_breakpoints.take() {
             if addr == context.pc() {
                 debug!(

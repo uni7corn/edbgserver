@@ -88,11 +88,14 @@ impl MultiThreadResume for EdbgTarget {
         let target_pid = self.get_pid()?;
         debug!("start handling resuming process {}", target_pid);
 
-        let dispatch_signal = |tid: u32, signal: Option<&Signal>| {
+        let mut done_cont: HashSet<u32> = HashSet::new();
+
+        let mut dispatch_signal = |tid: u32, signal: Option<&Signal>| {
             if let Some(sig) = signal {
                 send_sig_to_thread(target_pid, tid, sig);
             } else {
                 send_sigcont_to_thread(target_pid, tid);
+                done_cont.insert(tid);
             }
         };
 
@@ -116,20 +119,14 @@ impl MultiThreadResume for EdbgTarget {
             return Ok(());
         }
 
-        let handled_tids: HashSet<u32> = self
-            .resume_actions
-            .iter()
-            .map(|(tid, _)| tid.get() as u32)
-            .collect();
-
-        self.get_active_threads()?
-            .iter()
-            .map(|t| t.get() as u32)
-            .filter(|tid| !handled_tids.contains(tid))
-            .for_each(|tid| {
-                debug!("Continuing thread {} (implicit)", tid);
-                send_sigcont_to_thread(target_pid, tid);
-            });
+        if let Some(tid) = self.bound_tid
+            && !done_cont.contains(&tid)
+        {
+            debug!("implicitly continue thread {}", tid);
+            send_sigcont_to_thread(target_pid, tid);
+        } else {
+            debug!("no target need implicitly continue");
+        }
         Ok(())
     }
 }
@@ -281,12 +278,12 @@ impl EdbgTarget {
         };
         match add_breakpoint_func(self, next_pc) {
             Ok(link_id) => {
-                info!("Successfully attached UProbe at {:#x}", next_pc);
+                info!("Successfully attached step breakpoint at {:#x}", next_pc);
                 self.temp_step_breakpoints = Some((next_pc, link_id));
             }
             Err(e) => {
                 info!(
-                    "Failed to attach UProbe at {:#x}: {}. Checking for special cases...",
+                    "Failed to attach step breakpoint at {:#x}: {}. Checking for special cases...",
                     next_pc, e
                 );
                 if next_pc == curr_pc {
