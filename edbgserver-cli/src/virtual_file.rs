@@ -110,12 +110,12 @@ fn filter_maps_content(content: &str) -> String {
             modified_line = Some(line.replace("[anon:stack_and_tls:", "[stack:"));
         } else if is_user_lib {
             keep = true;
-        } else if is_system_path {
-            keep = false;
         } else if is_infra_lib {
             if is_exec || is_write {
                 keep = true;
             }
+        } else if is_system_path {
+            keep = false;
         } else if is_exec {
             keep = true;
         } else if is_bbs {

@@ -169,6 +169,7 @@ fn init_aya() -> aya::Ebpf {
         resource::RLIM_INFINITY,
     ) {
         error!("remove limit on locked memory failed: {}", e);
+        error!("NOTE: run as root or with sudo");
     }
     let mut ebpf = aya::Ebpf::load(aya::include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
