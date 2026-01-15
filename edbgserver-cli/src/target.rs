@@ -25,7 +25,6 @@ use gdbstub::{
     },
 };
 use log::{debug, error, trace, warn};
-use tokio::io::{Interest, unix::AsyncFd};
 
 use crate::target::{arch::TargetArch, multithread::ThreadAction};
 
@@ -42,7 +41,7 @@ pub struct EdbgTarget {
     ebpf: Ebpf,
     pub context: Option<DataT>,
     pub ring_buf: RingBuf<MapData>,
-    pub notifier: AsyncFd<OwnedFd>,
+    pub notifier: OwnedFd,
     thread_filter: Array<MapData, ThreadFilter>,
     active_sw_breakpoints: HashMap<u64, breakpoint::BreakpointHandle>,
     active_hw_breakpoints: HashMap<u64, breakpoint::BreakpointHandle>,
@@ -92,14 +91,10 @@ impl EdbgTarget {
             .expect("THREAD_FILTER map not found");
         let thread_filter: Array<MapData, ThreadFilter> =
             Array::try_from(thread_filter).expect("failed to convert filter map");
-        let notifier = AsyncFd::with_interest(
-            ringbuf
-                .as_fd()
-                .try_clone_to_owned()
-                .expect("failed to clone ringbuf fd"),
-            Interest::READABLE,
-        )
-        .expect("failed to create AsyncFd for ringbuf");
+        let notifier = ringbuf
+            .as_fd()
+            .try_clone_to_owned()
+            .expect("failed to clone ringbuf fd");
         Self {
             ebpf,
             context: None,

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{os::fd::AsFd, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use aya::programs::{
@@ -21,6 +21,7 @@ use gdbstub::{
     },
 };
 use log::{debug, error, info, trace, warn};
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use procfs::process::MMapPath;
 
 use crate::target::EdbgTarget;
@@ -437,16 +438,23 @@ impl EdbgTarget {
 
     pub async fn wait_for_init_trap(&mut self) -> Result<()> {
         info!("Waiting for target process to hit the initial breakpoint...");
-
+        let target_fd = self.notifier.as_fd();
+        let mut fds = [PollFd::new(target_fd, PollFlags::POLLIN)];
         loop {
-            let mut guard = self.notifier.readable_mut().await?;
+            poll(&mut fds, PollTimeout::NONE)?;
+            let Some(revents) = fds[0].revents() else {
+                continue;
+            };
+            if !revents.contains(PollFlags::POLLIN) {
+                continue;
+            }
+
             let mut captured_events = Vec::new();
             while let Some(item) = self.ring_buf.next() {
                 let ptr = item.as_ptr() as *const DataT;
                 let data = unsafe { std::ptr::read_unaligned(ptr) };
                 captured_events.push(data);
             }
-            guard.clear_ready();
             if captured_events.is_empty() {
                 continue;
             }

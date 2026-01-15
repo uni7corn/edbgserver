@@ -1,59 +1,66 @@
-use std::io;
-
-use gdbstub::conn::{Connection, ConnectionExt};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+use std::{
+    io::{self, BufRead, BufReader, BufWriter, Read, Write},
     net::TcpStream,
-    runtime::Handle,
+    os::fd::AsFd,
 };
 
-pub struct TokioConnection {
-    pub stream: BufReader<TcpStream>,
+use gdbstub::conn::{Connection, ConnectionExt};
+
+pub struct BufferedConnection {
+    stream_reader: BufReader<TcpStream>,
+    stream_writer: BufWriter<TcpStream>,
 }
 
-impl TokioConnection {
-    pub fn new(stream: TcpStream) -> Self {
-        Self {
-            stream: BufReader::new(stream),
-        }
+impl BufferedConnection {
+    pub fn new(stream: TcpStream) -> io::Result<Self> {
+        stream.set_nodelay(true)?;
+        let writer_stream = stream.try_clone()?;
+
+        Ok(Self {
+            stream_reader: BufReader::with_capacity(4096, stream),
+            stream_writer: BufWriter::with_capacity(4096, writer_stream),
+        })
+    }
+
+    pub fn has_buffered_data(&self) -> bool {
+        !self.stream_reader.buffer().is_empty()
     }
 }
 
-impl Connection for TokioConnection {
+impl Connection for BufferedConnection {
     type Error = io::Error;
 
     fn write(&mut self, byte: u8) -> Result<(), Self::Error> {
-        Handle::current().block_on(async { self.stream.write_u8(byte).await })
-    }
-
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        Handle::current().block_on(async { self.stream.flush().await })
+        self.stream_writer.write_all(&[byte])
     }
 
     fn write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
-        Handle::current().block_on(async { self.stream.write_all(buf).await })
+        self.stream_writer.write_all(buf)
     }
 
-    fn on_session_start(&mut self) -> Result<(), Self::Error> {
-        let tcp_stream = self.stream.get_ref();
-        tcp_stream.set_nodelay(true)?;
-        Ok(())
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.stream_writer.flush()
     }
 }
 
-impl ConnectionExt for TokioConnection {
+impl ConnectionExt for BufferedConnection {
     fn read(&mut self) -> Result<u8, Self::Error> {
-        Handle::current().block_on(async { self.stream.read_u8().await })
+        let mut buf = [0u8; 1];
+        self.stream_reader.read_exact(&mut buf)?;
+        Ok(buf[0])
     }
 
     fn peek(&mut self) -> Result<Option<u8>, Self::Error> {
-        Handle::current().block_on(async {
-            let buffer = self.stream.fill_buf().await?;
-            if buffer.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(buffer[0]))
-            }
-        })
+        let buf = self.stream_reader.fill_buf()?;
+        if buf.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(buf[0]))
+    }
+}
+
+impl AsFd for BufferedConnection {
+    fn as_fd(&self) -> std::os::unix::prelude::BorrowedFd<'_> {
+        self.stream_reader.get_ref().as_fd()
     }
 }

@@ -12,7 +12,7 @@ use log::{debug, error, info, warn};
 use nix::sys::resource::{self, Resource, setrlimit};
 use tokio::net::TcpListener;
 
-use crate::{connection::TokioConnection, event::EdbgEventLoop, target::EdbgTarget};
+use crate::{connection::BufferedConnection, event::EdbgEventLoop, target::EdbgTarget};
 mod connection;
 mod event;
 mod resolve_target;
@@ -135,17 +135,16 @@ async fn main() -> Result<()> {
         Err(e) => bail!("Failed to accept GDB connection: {}", e),
     };
 
-    let connection = TokioConnection::new(stream);
+    let std_stream = stream.into_std()?;
+    std_stream.set_nonblocking(false)?;
+
+    let connection = BufferedConnection::new(std_stream)?;
     let gdb = GdbStubBuilder::new(connection)
         .packet_buffer_size(4096)
         .build()?;
 
     // main run
-    let result =
-        tokio::task::spawn_blocking(move || gdb.run_blocking::<EdbgEventLoop>(&mut edbg_target))
-            .await
-            .expect("GDB Stub task panicked");
-    match result {
+    match gdb.run_blocking::<EdbgEventLoop>(&mut edbg_target) {
         Ok(disconnect_reason) => match disconnect_reason {
             DisconnectReason::Disconnect => info!("GDB Disconnected"),
             DisconnectReason::TargetExited(code) => info!("Target exited with code {}", code),
