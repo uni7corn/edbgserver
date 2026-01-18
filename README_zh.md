@@ -4,6 +4,8 @@
 
 一个基于 **eBPF** 实现的调试器服务端，旨在脱离 `ptrace` 系统调用以实现最小侵入特征，无视大部分调试限制。目前支持 **Android** 与 **Linux** 下的 Arm64 和 x86_64 架构。
 
+![](demo.png)
+
 ## 致谢
 
 特别感谢学长 [ShinoLeah](https://github.com/ShinoLeah) 的项目 [eDBG](https://github.com/ShinoLeah/eDBG)。本项目的名字还有原理均出于此，如果本项目帮到你的话也请给 [eDBG](https://github.com/ShinoLeah/eDBG) 一个星吧。

@@ -4,6 +4,8 @@
 
 An eBPF-powered debugger server designed to achieve minimal intrusive characteristics by bypassing the `ptrace` system call. Currently supports **Arm64** and **x86_64** architectures on **Android** and **Linux**.
 
+![](demo.png)
+
 ## Acknowledgments
 
 Special thanks to [ShinoLeah](https://github.com/ShinoLeah) for the project [eDBG](https://github.com/ShinoLeah/eDBG). This project derives its name and core principles from eDBG. If you find this tool helpful, please consider giving [eDBG](https://github.com/ShinoLeah/eDBG) a star as well.
