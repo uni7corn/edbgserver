@@ -64,7 +64,7 @@ Options:
 **Basic Android Debugging:**
 
 ```sh
-./edbgserver -p io.cyril.supervipplayer -t libsupervipplayer.so -b 0x1848
+./edbgserver -u -p io.cyril.supervipplayer -t libsupervipplayer.so -b 0x1848
 adb forward tcp:3333 localabstract:edbg
 pwndbg
 pwndbg> target remote :3333
