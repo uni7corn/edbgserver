@@ -69,6 +69,7 @@ impl EdbgEventLoop {
             "bound tid: {:?}, bound pid: {:?}",
             target.bound_tid, target.bound_pid
         );
+        let bound_tid = target.get_tid().ok();
 
         // HACK: Handling PID/TID mismatch in Linux Namespaces (e.g., WSL, Docker).
         //
@@ -98,7 +99,7 @@ impl EdbgEventLoop {
                 data.event_source
             );
 
-            if let Some(b_tid) = target.bound_tid
+            if let Some(b_tid) = bound_tid
                 && !target.is_multi_thread
                 && data.tid != b_tid
             {

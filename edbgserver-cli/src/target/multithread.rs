@@ -1,6 +1,6 @@
 use std::{collections::HashSet, ffi::OsStr, num::NonZero, os::unix::ffi::OsStrExt, process};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use gdbstub::{
     common::{Signal, Tid},
     target::{
@@ -14,7 +14,6 @@ use gdbstub::{
     },
 };
 use log::{debug, error, info, trace, warn};
-use procfs::process::Process;
 
 use crate::{
     target::EdbgTarget,
@@ -88,6 +87,22 @@ impl MultiThreadResume for EdbgTarget {
         let target_pid = self.get_pid()?;
         debug!("start handling resuming process {}", target_pid);
 
+        if self.is_scheduler_lock
+            && self.is_multi_thread
+            && let Some((tid, _)) = self.resume_actions.first()
+        {
+            // here we assume the first resume action is the scheduler lock thread...
+            // it seems gdb will only send one resume action with scheduler lock
+            debug!("Setting eBPF thread filter for TID: {}", tid);
+            if let Err(e) = self.thread_filter.set(
+                0,
+                edbgserver_common::ThreadFilter::Some(tid.get() as u32),
+                0,
+            ) {
+                warn!("Failed to set thread filter: {}", e);
+            }
+        }
+
         let mut done_cont: HashSet<u32> = HashSet::new();
 
         let mut dispatch_signal = |tid: u32, signal: Option<&Signal>| {
@@ -108,7 +123,7 @@ impl MultiThreadResume for EdbgTarget {
                 }
                 ThreadAction::Step(signal) => {
                     info!("Single stepping thread {} with signal {:?}", tid, signal);
-                    self.single_step_thread(self.context.unwrap().pc())?;
+                    self.single_step_thread(tid, self.context.unwrap().pc())?;
                     dispatch_signal(tid, signal.as_ref());
                 }
             }
@@ -119,7 +134,7 @@ impl MultiThreadResume for EdbgTarget {
             return Ok(());
         }
 
-        if let Some(tid) = self.bound_tid
+        if let Some(tid) = self.get_tid().ok()
             && !done_cont.contains(&tid)
         {
             debug!("implicitly continue thread {}", tid);
@@ -241,27 +256,26 @@ impl CurrentActivePid for EdbgTarget {
 
 impl EdbgTarget {
     pub fn get_active_threads(&self) -> Result<Vec<NonZero<usize>>> {
-        use anyhow::anyhow;
-        if !self.is_multi_thread {
-            return Ok(vec![
-                NonZero::new(self.bound_tid.ok_or(anyhow!("bound tid not set"))? as usize)
-                    .ok_or(anyhow!("tid is zero"))?,
-            ]);
-        }
-        let pid = self.get_pid()? as i32;
-
-        let process = Process::new(pid)?;
-
-        let threads: Vec<NonZero<usize>> = process
-            .tasks()?
-            .flatten()
-            .map(|t| NonZero::new(t.tid as usize).expect("TID 0 is invalid"))
-            .collect();
-
-        Ok(threads)
+        let pid = self.get_pid()?;
+        let tasks = if self.is_multi_thread {
+            procfs::process::Process::new(pid as i32)
+                .map_err(|e| anyhow::anyhow!("Failed to open process {}: {}", pid, e))?
+                .tasks()?
+                .filter_map(|t| t.ok())
+                .filter(|t| {
+                    t.status()
+                        .map(|s| !s.state.starts_with("Z") && !s.state.starts_with("X"))
+                        .unwrap_or(false)
+                })
+                .map(|t| NonZero::new(t.tid as usize).unwrap())
+                .collect::<Vec<_>>()
+        } else {
+            vec![NonZero::new(self.get_tid()? as usize).unwrap()]
+        };
+        Ok(tasks)
     }
 
-    fn single_step_thread(&mut self, curr_pc: u64) -> Result<()> {
+    fn single_step_thread(&mut self, tid: u32, curr_pc: u64) -> Result<()> {
         let next_pc = self
             .calculation_next_pc(curr_pc)
             .map_err(|e| anyhow!("Failed to calculate next PC for single step: {}", e))?;
@@ -271,12 +285,19 @@ impl EdbgTarget {
         {
             return Ok(());
         }
-        let add_breakpoint_func = if self.step_use_uprobe {
-            EdbgTarget::internel_attach_uprobe
+        if self.is_multi_thread {
+            self.thread_filter
+                .set(0, edbgserver_common::ThreadFilter::Some(tid), 0)
+                .context(anyhow!("thread filter set failed"))?;
+        }
+
+        let attach_res = if self.step_use_uprobe {
+            self.internel_attach_uprobe(next_pc, Some(tid))
         } else {
-            EdbgTarget::internel_attach_perf_event_break_point
+            self.internel_attach_perf_event_break_point(next_pc, Some(tid))
         };
-        match add_breakpoint_func(self, next_pc) {
+
+        match attach_res {
             Ok(link_id) => {
                 info!("Successfully attached step breakpoint at {:#x}", next_pc);
                 self.temp_step_breakpoints = Some((next_pc, link_id));
@@ -296,7 +317,7 @@ impl EdbgTarget {
                     "Skipping un-attachable instruction at {:#x}, recursively stepping...",
                     next_pc
                 );
-                self.single_step_thread(next_pc)?;
+                self.single_step_thread(tid, next_pc)?;
             }
         }
         Ok(())

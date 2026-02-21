@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use aya::{
     Ebpf,
     maps::{Array, MapData, RingBuf},
@@ -140,7 +140,11 @@ impl EdbgTarget {
 
     pub fn get_pid(&self) -> Result<u32> {
         self.bound_pid
-            .ok_or_else(|| anyhow::anyhow!("Target process is not running or not attached"))
+            .ok_or(anyhow!("Target process is not running or not attached"))
+    }
+
+    pub fn get_tid(&self) -> Result<u32> {
+        self.bound_tid.ok_or(anyhow!("Target bound tid is not set"))
     }
 }
 
@@ -202,19 +206,49 @@ impl MultiThreadBase for EdbgTarget {
         regs: &mut <Self::Arch as gdbstub::arch::Arch>::Registers,
         tid: gdbstub::common::Tid,
     ) -> TargetResult<(), Self> {
-        if let Some(ctx) = &self.context {
-            if !self.is_multi_thread || ctx.tid == tid.get() as u32 {
-                arch::fill_regs(regs, ctx);
-                return Ok(());
-            } else {
-                debug!("Req regs for TID {} but context is for {}", tid, ctx.tid);
-            }
+        debug!("enter read register tid: {}", tid);
+        if let Some(ctx) = &self.context
+            && (!self.is_multi_thread || ctx.tid == tid.get() as u32)
+        {
+            debug!("fill registers from context");
+            arch::fill_regs(regs, ctx);
+            return Ok(());
         }
-        warn!(
-            "Requesting registers for TID {} but no matching context",
-            tid
-        );
-        debug!("last_context: {:?}", self.context);
+        debug!("fill registers from /proc syscall");
+        debug!("ctx: {:?}", self.context);
+        debug!("is_multi_thread: {}", self.is_multi_thread);
+        debug!("requested tid: {}", tid);
+        // open /proc/pid/tasks/tid/syscall to get pc
+        let Some(pid) = self.bound_pid else {
+            error!("pid not bound yet");
+            return Err(TargetError::NonFatal);
+        };
+        let Some(content) =
+            std::fs::read_to_string(format!("/proc/{}/task/{}/syscall", pid, tid)).ok()
+        else {
+            error!("failed to read /proc/{}/task/{}/syscall", pid, tid);
+            return Err(TargetError::NonFatal);
+        };
+        let contents: Vec<_> = content.split_whitespace().collect();
+        if contents.len() < 2 {
+            error!(
+                "invalid syscall content: len is {}, content: {}",
+                contents.len(),
+                content
+            );
+            return Err(TargetError::NonFatal);
+        }
+        let parse_hex = |s: &str| -> u64 {
+            u64::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or_else(|e| {
+                error!("Failed to parse hex: {}. String: {}", e, s);
+                0
+            })
+        };
+        let sp = parse_hex(contents[contents.len() - 2]);
+        let pc = parse_hex(contents[contents.len() - 1]);
+
+        debug!("read sp: {:#x}, pc: {:#x}", sp, pc);
+        arch::fill_regs_minimal(regs, sp, pc);
         Ok(())
     }
 

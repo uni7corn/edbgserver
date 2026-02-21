@@ -39,6 +39,11 @@ pub fn fill_regs(regs: &mut X86_64CoreRegs, ctx: &DataT) {
     regs.eflags = ctx.eflags as u32;
 }
 
+pub fn fill_regs_minimal(regs: &mut X86_64CoreRegs, sp: u64, pc: u64) {
+    regs.rip = pc;
+    regs.regs[7] = sp;
+}
+
 impl SingleRegisterAccess<Tid> for EdbgTarget {
     fn read_register(
         &mut self,
@@ -125,7 +130,7 @@ impl EdbgTarget {
     fn read_instruction_buf(&self, pc: u64) -> Result<[u8; 15]> {
         let mut buf = [0u8; 15];
         use process_memory::{CopyAddress, TryIntoProcessHandle};
-        let pid = self.get_pid()?;
+        let pid = self.get_tid()?;
         // trace!("[ReadMem] Reading 15 bytes from PID {} at {:#x}", pid, pc);
         let handle = (pid as i32).try_into_process_handle()?;
         handle.copy_address(pc as usize, &mut buf)?;

@@ -18,7 +18,7 @@ impl ExecFile for EdbgTarget {
         } else {
             let target_pid = pid
                 .map(|p| p.get() as u32)
-                .or(self.bound_pid)
+                .or_else(|| self.get_tid().ok())
                 .ok_or(TargetError::NonFatal)?;
 
             Process::new(target_pid as i32)

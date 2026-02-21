@@ -98,6 +98,11 @@ pub fn fill_regs(regs: &mut AArch64MinimalRegs, ctx: &DataT) {
     regs.cpsr = ctx.pstate as u32;
 }
 
+pub fn fill_regs_minimal(regs: &mut AArch64MinimalRegs, sp: u64, pc: u64) {
+    regs.pc = pc;
+    regs.sp = sp;
+}
+
 impl SingleRegisterAccess<Tid> for EdbgTarget {
     fn read_register(
         &mut self,
@@ -158,7 +163,7 @@ impl EdbgTarget {
     fn read_instruction(&self, pc: u64) -> Result<u32> {
         let mut buf = [0u8; 4];
         use process_memory::{CopyAddress, TryIntoProcessHandle};
-        let handle = (self.get_pid()? as i32).try_into_process_handle()?;
+        let handle = (self.get_tid()? as i32).try_into_process_handle()?;
         handle.copy_address(pc as usize, &mut buf)?;
         Ok(u32::from_le_bytes(buf))
     }

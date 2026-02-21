@@ -125,7 +125,8 @@ impl EdbgTarget {
 
     fn get_auxv_val(&self, target_key: u64) -> Result<u64> {
         let pid = self.get_pid()?;
-        let auxv_path = format!("/proc/{}/auxv", pid);
+        let tid = self.get_tid()?;
+        let auxv_path = format!("/proc/{}/task/{}/auxv", pid, tid);
         let mut auxv_file = std::fs::File::open(&auxv_path)?;
 
         iter::from_fn(|| {

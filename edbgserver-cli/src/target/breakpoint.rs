@@ -59,7 +59,7 @@ impl SwBreakpoint for EdbgTarget {
         if self.active_sw_breakpoints.contains_key(&addr) {
             return Ok(false);
         }
-        match self.internel_attach_uprobe(addr) {
+        match self.internel_attach_uprobe(addr, None) {
             Ok(link_id) => {
                 info!("Attached UProbe at VMA: {:#x}", addr);
                 self.active_sw_breakpoints.insert(addr, link_id);
@@ -70,7 +70,7 @@ impl SwBreakpoint for EdbgTarget {
                     "Failed to add SW breakpoint at {:#x}: {:#}, fallback to HW breakpoint...",
                     addr, e
                 );
-                match self.internel_attach_perf_event_break_point(addr) {
+                match self.internel_attach_perf_event_break_point(addr, None) {
                     Ok(link_ids) => {
                         info!("Attached perf event at VMA: {:#x}", addr);
                         self.active_sw_breakpoints.insert(addr, link_ids);
@@ -114,7 +114,7 @@ impl HwBreakpoint for EdbgTarget {
         if self.active_hw_breakpoints.contains_key(&addr) {
             return Ok(false);
         }
-        match self.internel_attach_perf_event_break_point(addr) {
+        match self.internel_attach_perf_event_break_point(addr, None) {
             Ok(link_ids) => {
                 info!("Attached perf event at VMA: {:#x}", addr);
                 self.active_hw_breakpoints.insert(addr, link_ids);
@@ -241,9 +241,9 @@ impl HwWatchpoint for EdbgTarget {
 
 impl EdbgTarget {
     fn resolve_vma_to_probe_location(&self, vma: u64) -> Result<(u64, PathBuf)> {
-        let pid = self.get_pid()?;
+        let tid = self.bound_tid.ok_or(anyhow!("bound tid not set"))?;
         let process =
-            procfs::process::Process::new(pid as i32).expect("Failed to open process info");
+            procfs::process::Process::new(tid as i32).expect("Failed to open process info");
         let maps = process.maps().expect("Failed to read process maps");
 
         for map in maps {
@@ -264,11 +264,15 @@ impl EdbgTarget {
         bail!("Failed to find mapping for VMA {:#x}", vma);
     }
 
-    pub fn internel_attach_uprobe(&mut self, addr: u64) -> Result<BreakpointHandle> {
+    pub fn internel_attach_uprobe(
+        &mut self,
+        addr: u64,
+        specific_tid: Option<u32>,
+    ) -> Result<BreakpointHandle> {
         let (location, target) = self
             .resolve_vma_to_probe_location(addr)
             .context(format!("Failed to resolve VMA {:#x}", addr))?;
-        let target_pid = self.get_pid()?;
+        let target_pid = specific_tid.unwrap_or(self.get_pid()?);
         debug!(
             "Attaching Temp/Internal UProbe to {:?} at offset {:#x} (VMA: {:#x})",
             target, location, addr
@@ -289,20 +293,28 @@ impl EdbgTarget {
     pub fn internel_attach_perf_event_break_point(
         &mut self,
         addr: u64,
+        specific_tid: Option<u32>,
     ) -> Result<BreakpointHandle> {
         let pid = self.get_pid()?;
         debug!("Attaching perf event to {:#x} for process {}", addr, pid);
         let config = PerfEventConfig::Breakpoint(BreakpointConfig::Instruction { address: addr });
         let sample_policy = SamplePolicy::Period(1);
-        let tasks = if self.is_multi_thread {
+        let tasks = if let Some(tid) = specific_tid {
+            vec![tid]
+        } else if self.is_multi_thread {
             procfs::process::Process::new(pid as i32)
                 .map_err(|e| anyhow::anyhow!("Failed to open process {}: {}", pid, e))?
                 .tasks()?
                 .filter_map(|t| t.ok())
+                .filter(|t| {
+                    t.status()
+                        .map(|s| !s.state.starts_with("Z") && !s.state.starts_with("X"))
+                        .unwrap_or(false)
+                })
                 .map(|t| t.tid as u32)
                 .collect::<Vec<_>>()
         } else {
-            vec![self.bound_tid.expect("bound_tid is not set")]
+            vec![self.get_tid()?]
         };
         let mut links = Vec::new();
         let prog = self.get_perf_event_program();
@@ -361,10 +373,15 @@ impl EdbgTarget {
                 .map_err(|e| anyhow::anyhow!("Failed to open process {}: {}", pid, e))?
                 .tasks()?
                 .filter_map(|t| t.ok())
+                .filter(|t| {
+                    t.status()
+                        .map(|s| !s.state.starts_with("Z") && !s.state.starts_with("X"))
+                        .unwrap_or(false)
+                })
                 .map(|t| t.tid as u32)
                 .collect::<Vec<_>>()
         } else {
-            vec![self.bound_tid.expect("bound_tid is not set")]
+            vec![self.get_tid()?]
         };
         let mut links = Vec::new();
         let prog = self.get_perf_event_program();
@@ -461,7 +478,7 @@ impl EdbgTarget {
             let first_event = captured_events.first().unwrap();
             // if the target pid is specify and doesn't match, this will happen in namespace scenario (e.g WSL)
             // we just map it to the our target pid
-            let target_pid = if let Some(target_pid) = self.bound_pid
+            let target_pid = if let Some(target_pid) = self.get_pid().ok()
                 && first_event.pid != target_pid
             {
                 warn!(
@@ -475,23 +492,25 @@ impl EdbgTarget {
             let target_tid = first_event.tid;
             let trap_pc = first_event.pc();
 
-            info!(
-                "Initial UProbe Hit! Locking onto PID: {}. TID: {}, PC: {:#x}",
+            println!(
+                "Hit! PID: {}. TID: {}, PC: {:#x}",
                 target_pid, target_tid, trap_pc
             );
             self.context = Some(*first_event);
 
-            let exe = procfs::process::Process::new(target_pid as i32).and_then(|p| p.exe())?;
+            let tid_exe_path = format!("/proc/{}/task/{}/exe", target_pid, target_tid);
+            let exe_path = std::fs::read_link(&tid_exe_path)
+                .map_err(|_| procfs::ProcError::NotFound(Some(tid_exe_path.into())))?;
             debug!(
                 "Target process executable path: {}",
-                exe.canonicalize()?.as_os_str().display()
+                exe_path.canonicalize()?.as_os_str().display()
             );
-            self.exec_path = Some(exe);
+            self.exec_path = Some(exe_path);
             self.bound_pid = Some(target_pid);
             self.bound_tid = Some(target_tid);
 
             use process_memory::TryIntoProcessHandle;
-            self.process_memory_handle = (target_pid as i32).try_into_process_handle().ok();
+            self.process_memory_handle = (target_tid as i32).try_into_process_handle().ok();
 
             if let Err(e) = self.update_libraries_cache() {
                 error!("Failed to update libraries cache in init trap: {}", e);
@@ -600,6 +619,11 @@ impl EdbgTarget {
             context.pc()
         );
         self.bound_tid = Some(context.tid);
+        if self.is_multi_thread
+            && let Err(e) = self.thread_filter.set(0, ThreadFilter::None, 0)
+        {
+            warn!("Failed to reset thread filter to None: {}", e);
+        }
         if let Some((addr, link_id)) = self.temp_step_breakpoints.take() {
             if addr == context.pc() {
                 debug!(
