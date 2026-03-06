@@ -537,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "edbgserver-cli"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "aya",
@@ -567,14 +567,14 @@ dependencies = [
 
 [[package]]
 name = "edbgserver-common"
-version = "1.0.1"
+version = "1.2.0"
 dependencies = [
  "aya",
 ]
 
 [[package]]
 name = "edbgserver-ebpf"
-version = "1.0.2"
+version = "1.2.0"
 dependencies = [
  "aya-ebpf",
  "aya-log-ebpf",
