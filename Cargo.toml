@@ -54,6 +54,10 @@ opt-level = 3
 lto = true
 codegen-units = 1
 
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [profile.release.package.edbgserver-ebpf]
 debug = 2
 codegen-units = 1

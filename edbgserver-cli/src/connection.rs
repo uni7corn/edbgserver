@@ -87,20 +87,18 @@ impl gdbstub::conn::Connection for BufferedConnection {
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
-        Ok(())
+        self.stream_writer.flush()
     }
 }
 
 impl gdbstub::conn::ConnectionExt for BufferedConnection {
     fn read(&mut self) -> Result<u8, Self::Error> {
-        self.stream_writer.flush()?;
         let mut buf = [0u8; 1];
         self.stream_reader.read_exact(&mut buf)?;
         Ok(buf[0])
     }
 
     fn peek(&mut self) -> Result<Option<u8>, Self::Error> {
-        self.stream_writer.flush()?;
         let buf = self.stream_reader.fill_buf()?;
         if buf.is_empty() {
             return Ok(None);
