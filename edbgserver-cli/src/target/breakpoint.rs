@@ -272,18 +272,18 @@ impl EdbgTarget {
         let (location, target) = self
             .resolve_vma_to_probe_location(addr)
             .context(format!("Failed to resolve VMA {:#x}", addr))?;
-        let target_pid = specific_tid.unwrap_or(self.get_pid()?);
+        let target_tid = specific_tid.unwrap_or(self.get_tid()?);
         debug!(
             "Attaching Temp/Internal UProbe to {:?} at offset {:#x} (VMA: {:#x})",
             target, location, addr
         );
         let link_id = self
             .get_probe_program()
-            .attach(location, target.canonicalize()?, Some(target_pid))
+            .attach(location, target.canonicalize()?, Some(target_tid))
             .map_err(|e| {
                 error!(
-                    "aya uprobe attach failed. location: {:#x}, target: {:?}, pid: {}. error: {:#?}",
-                    location, target, target_pid, e
+                    "aya uprobe attach failed. location: {:#x}, target: {:?}, tid: {}. error: {:#?}",
+                    location, target, target_tid, e
                 );
                 anyhow::anyhow!("aya urpobe attach failed: {}", e)
             })?;
